@@ -2,13 +2,13 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { getTransactionDetails } from "../utils/utils";
 import { swapTokens } from "../services/jupiter";
 import dotenv from "dotenv";
-import { decodeMemo } from "../utils/memoPArser";
+import { decodeMemo } from "../utils/memoParser";
+import { sendTransaction } from "../services/jupiter";
 
 dotenv.config();
 
 const SOLANA_RPC_URL =
   process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-const MERCHANT_WALLET = new PublicKey(process.env.MERCHANT_WALLET!);
 const USDC_MINT_ADDRESS = new PublicKey(process.env.USDC_MINT_ADDRESS!);
 
 const connection = new Connection(SOLANA_RPC_URL, "confirmed");
@@ -34,12 +34,7 @@ async function handleTransaction(signature: string) {
 
     if (tokenMint.equals(USDC_MINT_ADDRESS)) {
       console.log(`Token is already USDC. Sending directly to merchant.`);
-      await sendTransaction(
-        recipient,
-        new PublicKey(merchantAddr),
-        amount,
-        tokenMint,
-      );
+      await sendTransaction(new PublicKey(merchantAddr), amount, tokenMint);
     } else {
       console.log(`Swapping ${amount} to USDC.`);
       await swapTokens(sender, recipient, amount, tokenMint, USDC_MINT_ADDRESS);
