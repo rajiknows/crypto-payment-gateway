@@ -2,6 +2,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { getTransactionDetails } from "../utils/utils";
 import { swapTokens } from "../services/jupiter";
 import dotenv from "dotenv";
+import { decodeMemo } from "../utils/memoPArser";
 
 dotenv.config();
 
@@ -18,17 +19,29 @@ async function handleTransaction(signature: string) {
     if (!txDetails) return console.log(`Transaction ${signature} not found.`);
 
     const { sender, recipient, amount, tokenMint } = txDetails;
+
+    // Fetch transaction and extract memo
+    const transaction = await connection.getParsedTransaction(signature, {
+      maxSupportedTransactionVersion: 0,
+    });
+    const merchantAddr = decodeMemo(transaction);
+    if (!merchantAddr)
+      return console.error("No merchant address found in memo!");
+
     console.log(
-      `Received ${amount} of ${tokenMint.toBase58()} from ${sender.toBase58()}`,
+      `Received ${amount} of ${tokenMint.toBase58()} from ${sender.toBase58()} for merchant ${merchantAddr}`,
     );
 
     if (tokenMint.equals(USDC_MINT_ADDRESS)) {
       console.log(`Token is already USDC. Sending directly to merchant.`);
-      await sendTransaction(recipient, MERCHANT_WALLET, amount, tokenMint);
-    } else {
-      console.log(
-        `Swapping ${amount} of ${tokenMint.toBase58()} to USDC using Jupiter.`,
+      await sendTransaction(
+        recipient,
+        new PublicKey(merchantAddr),
+        amount,
+        tokenMint,
       );
+    } else {
+      console.log(`Swapping ${amount} to USDC.`);
       await swapTokens(sender, recipient, amount, tokenMint, USDC_MINT_ADDRESS);
       console.log("Swap complete, USDC sent to merchant.");
     }
