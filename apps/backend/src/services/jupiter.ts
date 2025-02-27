@@ -4,14 +4,15 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import {
-  createTransferInstruction,
-  getAssociatedTokenAddress,
-} from "@solana/spl-token";
-import { config } from "../config";
-import { connection } from "../index";
+import { config } from "../config.js";
+import { connection } from "../index.js";
+import { prisma } from "@repo/db";
+import axios from "axios";
 
 const { WALLET_SECRET } = config;
+
+// Create wallet keypair from secret
+const wallet = Keypair.fromSecretKey(Buffer.from(JSON.parse(WALLET_SECRET)));
 
 export async function swapTokens(
   sender: PublicKey,
@@ -19,107 +20,162 @@ export async function swapTokens(
   amount: number,
   fromToken: PublicKey,
   toToken: PublicKey,
+  txHash?: string,
 ) {
-  const quoteAmount = await getQuoteAmount(fromToken, toToken, amount);
-  if (!quoteAmount) throw new Error("Failed to get quote amount");
-
-  const wallet = Keypair.fromSecretKey(
-    Uint8Array.from(JSON.parse(WALLET_SECRET)),
+  const { createTransferInstruction, getAssociatedTokenAddress } = await import(
+    "@solana/spl-token"
   );
+  try {
+    console.log(
+      `Swapping ${amount} of ${fromToken.toBase58()} to ${toToken.toBase58()}`,
+    );
 
-  const senderTokenAccount = await getAssociatedTokenAddress(
-    fromToken,
-    wallet.publicKey,
-  );
-  const recipientTokenAccount = await getAssociatedTokenAddress(
-    toToken,
-    recipient,
-  );
+    // Update payment status to swapping
+    if (txHash) {
+      await prisma.payment.update({
+        where: { txHash },
+        data: {
+          status: "swapped",
+          updatedAt: new Date(),
+        },
+      });
+    }
 
-  // Perform swap using Jupiter API
-  const swapSignature = await executeSwap(fromToken, toToken, amount, wallet);
-  if (!swapSignature) throw new Error("Swap transaction failed");
+    // 1. Get quote from Jupiter API
+    const quoteResponse = await axios.get("https://quote-api.jup.ag/v6/quote", {
+      params: {
+        inputMint: fromToken.toBase58(),
+        outputMint: toToken.toBase58(),
+        amount: amount * 1e6, // Assuming 6 decimals - adjust based on token
+        slippageBps: 50, // 0.5% slippage
+      },
+    });
 
-  // After swap, send the received tokens to the recipient
-  const sendSignature = await sendTransaction(recipient, quoteAmount, toToken);
-  return { swapSignature, sendSignature };
-}
+    const { data: quoteData } = quoteResponse;
 
-export async function getQuoteAmount(
-  fromToken: PublicKey,
-  toToken: PublicKey,
-  amount: number,
-) {
-  const JUPITER_API_URL = "https://quote-api.jup.ag/v6/quote";
-  const params = new URLSearchParams({
-    inputMint: fromToken.toBase58(),
-    outputMint: toToken.toBase58(),
-    amount: amount.toString(),
-    slippageBps: "50", // 0.5% slippage
-  });
+    // 2. Get serialized transactions
+    const { data: swapData } = await axios.post(
+      "https://quote-api.jup.ag/v6/swap",
+      {
+        quoteResponse: quoteData,
+        userPublicKey: wallet.publicKey.toBase58(),
+        destinationTokenAccount: recipient.toBase58(),
+      },
+    );
 
-  const response = await fetch(`${JUPITER_API_URL}?${params}`);
-  const data = await response.json();
-  return data?.outAmount ? Number(data.outAmount) : null;
-}
+    // 3. Execute the transaction
+    const swapTransaction = swapData.swapTransaction;
+    const txid = await connection.sendRawTransaction(
+      Buffer.from(swapTransaction, "base64"),
+    );
 
-async function executeSwap(
-  fromToken: PublicKey,
-  toToken: PublicKey,
-  amount: number,
-  wallet: Keypair,
-) {
-  const JUPITER_SWAP_URL = "https://quote-api.jup.ag/v6/swap";
-  const requestBody = {
-    inputMint: fromToken.toBase58(),
-    outputMint: toToken.toBase58(),
-    amount,
-    slippageBps: 50, // 0.5% slippage
-    userPublicKey: wallet.publicKey.toBase58(),
-  };
+    await connection.confirmTransaction(
+      {
+        signature: txid,
+        blockhash: (await connection.getLatestBlockhash()).blockhash,
+        lastValidBlockHeight: (await connection.getLatestBlockhash())
+          .lastValidBlockHeight,
+      },
+      "confirmed",
+    );
 
-  const response = await fetch(JUPITER_SWAP_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
+    console.log("Swap completed successfully:", txid);
 
-  const swapResult = await response.json();
-  if (!swapResult.swapTransaction) return null;
+    // Update payment record if txHash is provided
+    if (txHash) {
+      await prisma.payment.update({
+        where: { txHash },
+        data: {
+          status: "completed",
+          updatedAt: new Date(),
+        },
+      });
+    }
 
-  const swapTransaction = Transaction.from(
-    Buffer.from(swapResult.swapTransaction, "base64"),
-  );
-  swapTransaction.sign(wallet);
-  return await sendAndConfirmTransaction(connection, swapTransaction, [wallet]);
+    return txid;
+  } catch (error) {
+    console.error("Error swapping tokens:", error);
+
+    // Update payment record as failed if txHash is provided
+    if (txHash) {
+      await prisma.payment.update({
+        where: { txHash },
+        data: {
+          status: "failed",
+          updatedAt: new Date(),
+        },
+      });
+    }
+
+    throw error;
+  }
 }
 
 export async function sendTransaction(
+  sender: PublicKey,
   recipient: PublicKey,
   amount: number,
   tokenMint: PublicKey,
+  txHash?: string,
 ) {
-  const wallet = Keypair.fromSecretKey(
-    Uint8Array.from(JSON.parse(WALLET_SECRET)),
+  const { createTransferInstruction, getAssociatedTokenAddress } = await import(
+    "@solana/spl-token"
   );
+  try {
+    // Get token accounts
+    const senderTokenAccount = await getAssociatedTokenAddress(
+      tokenMint,
+      sender,
+    );
 
-  const senderTokenAccount = await getAssociatedTokenAddress(
-    tokenMint,
-    wallet.publicKey,
-  );
-  const recipientTokenAccount = await getAssociatedTokenAddress(
-    tokenMint,
-    recipient,
-  );
+    const recipientTokenAccount = await getAssociatedTokenAddress(
+      tokenMint,
+      recipient,
+    );
 
-  const transaction = new Transaction().add(
-    createTransferInstruction(
+    // Create transfer instruction
+    const transferInstruction = createTransferInstruction(
       senderTokenAccount,
       recipientTokenAccount,
-      wallet.publicKey,
-      amount,
-    ),
-  );
+      sender,
+      Math.round(amount * 1e6), // assuming 6 decimals for USDC, ensure it's an integer
+    );
 
-  return await sendAndConfirmTransaction(connection, transaction, [wallet]);
+    // Create and sign transaction
+    const transaction = new Transaction().add(transferInstruction);
+
+    const signature = await sendAndConfirmTransaction(connection, transaction, [
+      wallet,
+    ]);
+
+    console.log(`Transaction sent: ${signature}`);
+
+    // Update payment record if txHash is provided
+    if (txHash) {
+      await prisma.payment.update({
+        where: { txHash },
+        data: {
+          status: "completed",
+          updatedAt: new Date(),
+        },
+      });
+    }
+
+    return signature;
+  } catch (error) {
+    console.error("Error sending transaction:", error);
+
+    // Update payment record as failed if txHash is provided
+    if (txHash) {
+      await prisma.payment.update({
+        where: { txHash },
+        data: {
+          status: "failed",
+          updatedAt: new Date(),
+        },
+      });
+    }
+
+    throw error;
+  }
 }

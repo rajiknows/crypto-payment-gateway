@@ -1,26 +1,35 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import tokenRoutes from "./routes/tokenRoutes";
 import "./workers/swapWorker"; // Start WebSocket listener
 import { config } from "./config";
-import { Connection } from "@solana/web3.js";
+import { Connection, clusterApiUrl } from "@solana/web3.js";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-const { SOLANA_MAINNET } = config;
+// Solana connection
+export const connection = new Connection(
+  config.SOLANA_RPC_URL || clusterApiUrl("mainnet-beta"),
+  "confirmed",
+);
 
-// make a conenction and export it , like a singleton
-export const connection = new Connection(SOLANA_MAINNET, "confirmed");
-
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-app.use("/tokens", tokenRoutes);
+// Routes
 
+// Error handling
+//@ts-ignore
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: "Internal Server Error" });
+});
+
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

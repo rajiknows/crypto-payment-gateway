@@ -30,7 +30,7 @@ model Payment {
     txHash       String   @unique // Transaction hash of the payment
     amount       Decimal
     token        String // Token used for payment
-    status       String   @default("pending") // pending, swapped, completed, failed
+    status       String   @default("pending")
     merchantAddr String // The final merchant receiving USDC
     createdAt    DateTime @default(now())
     updatedAt    DateTime @updatedAt
